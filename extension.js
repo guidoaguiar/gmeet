@@ -8,6 +8,8 @@ import * as ModalDialog from 'resource:///org/gnome/shell/ui/modalDialog.js';
 import * as PanelMenu from 'resource:///org/gnome/shell/ui/panelMenu.js';
 import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 
+Gio._promisify(Gio.File.prototype, 'load_contents_async');
+
 class GMeetManager {
     constructor(extension) {
         this.extension = extension;
@@ -15,6 +17,7 @@ class GMeetManager {
         this._indicator = new PanelMenu.Button(0.0, 'Google Meet', false);
         this._separator = null;
         this._horizontalContainer = null;
+        this._footerMenuItem = null;
 
         const icon = new St.Icon({
             gicon: Gio.icon_new_for_string(
@@ -78,11 +81,12 @@ class GMeetManager {
                 }
                 this._bookmarks = this._parseBookmarksSafe(defaultBookmarks, 'default');
             } else {
-                const [success, bin] = bookmarksFile.load_contents(null);
-                if (success) {
-                    const text = new TextDecoder('utf-8').decode(bin);
+                try {
+                    const [contents] = await bookmarksFile.load_contents_async(null);
+                    const text = new TextDecoder('utf-8').decode(contents);
                     this._bookmarks = this._parseBookmarksSafe(text, 'bookmarks.json');
-                } else {
+                } catch (readErr) {
+                    this._debugLog('Bookmarks async read failed: ' + readErr.message);
                     this._bookmarks = [];
                 }
             }
@@ -134,8 +138,8 @@ class GMeetManager {
     }
 
     _addAdditionalMenuItems() {
-        // Separator/container are disposed by menu.removeAll() before rebuild,
-        // with refs cleared in _updateMenu() — avoid double-destroy here.
+        // Separator/footer are cleared in _updateMenu() via removeAll(); disable()
+        // destroys them explicitly for extension teardown.
 
         if (this._bookmarks.length > 0) {
             this._separator = new PopupMenu.PopupSeparatorMenuItem();
@@ -143,7 +147,7 @@ class GMeetManager {
         }
 
         // Create a PopupBaseMenuItem to host the horizontal container
-        let containerMenuItem = new PopupMenu.PopupBaseMenuItem({
+        this._footerMenuItem = new PopupMenu.PopupBaseMenuItem({
             reactive: false,
             can_focus: false
         });
@@ -155,7 +159,7 @@ class GMeetManager {
             x_expand: true
         });
 
-        containerMenuItem.add_child(this._horizontalContainer);
+        this._footerMenuItem.add_child(this._horizontalContainer);
 
         // Add button
         let addItem = new St.Button({
@@ -180,7 +184,7 @@ class GMeetManager {
         this._horizontalContainer.add_child(newMeetItem);
 
         // Add the container menu item to the menu
-        this._indicator.menu.addMenuItem(containerMenuItem);
+        this._indicator.menu.addMenuItem(this._footerMenuItem);
     }
 
     // Log messages for debugging
@@ -206,6 +210,7 @@ class GMeetManager {
         this._indicator.menu.removeAll();
         this._separator = null;
         this._horizontalContainer = null;
+        this._footerMenuItem = null;
         this._addBookmarksToMenu();
     }
 
@@ -404,35 +409,56 @@ class GMeetExtension extends Extension {
         if (!this._manager)
             return;
 
-        // Remove menu items deterministically to avoid lingering references
-        try {
-            if (this._manager._indicator && this._manager._indicator.menu)
-                this._manager._indicator.menu.removeAll();
-        } catch (e) {
-            try { this._manager._indicator && this._manager._indicator.menu && this._manager._indicator.menu.removeAll(); } catch (e) { }
-        }
+        const m = this._manager;
 
         // Close any open modal
         try {
-            if (this._manager._modal) {
-                this._manager._modal.close();
-                this._manager._modal = null;
+            if (m._modal) {
+                m._modal.close();
+                m._modal = null;
             }
         } catch (e) { /* ignore */ }
 
-        // Destroy the top-level indicator
+        // Explicit destroy for objects the linter tracks (before menu.removeAll / indicator.destroy)
         try {
-            if (this._manager._indicator) {
-                this._manager._indicator.destroy();
-                this._manager._indicator = null;
+            if (m._separator) {
+                m._separator.destroy();
+                m._separator = null;
             }
         } catch (e) { /* ignore */ }
 
-        // Release owned references
-        this._manager._separator = null;
-        this._manager._horizontalContainer = null;
+        try {
+            if (m._footerMenuItem) {
+                m._footerMenuItem.destroy();
+                m._footerMenuItem = null;
+                m._horizontalContainer = null;
+            } else if (m._horizontalContainer) {
+                m._horizontalContainer.destroy();
+                m._horizontalContainer = null;
+            }
+        } catch (e) { /* ignore */ }
 
-        // Finally drop the manager reference
+        try {
+            if (m._indicator?.menu)
+                m._indicator.menu.removeAll();
+        } catch (e) {
+            try {
+                if (m._indicator?.menu)
+                    m._indicator.menu.removeAll();
+            } catch (e2) { /* ignore */ }
+        }
+
+        m._separator = null;
+        m._horizontalContainer = null;
+        m._footerMenuItem = null;
+
+        try {
+            if (m._indicator) {
+                m._indicator.destroy();
+                m._indicator = null;
+            }
+        } catch (e) { /* ignore */ }
+
         this._manager = null;
     }
 }
